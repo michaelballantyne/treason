@@ -51,7 +51,9 @@ Lean 4's elaborator produces an `InfoTree` during elaboration — the same archi
 
 ### Not novel: Cursor insertion for autocomplete
 
-rust-analyzer uses the same trick, called the "IntelliJ Trick" in their contributing guide: insert a fake identifier (`complete_me`) at the cursor position, re-parse, and analyze the patched tree. For macros specifically, rust-analyzer's `expand_speculative` re-expands the enclosing macro with the fake identifier in its arguments and maps the token into the expansion. This is actually *more targeted* than treason's approach (which re-expands the entire program). The `expand_speculative` approach avoids polluting the salsa cache and only re-expands the relevant macro call, not the whole file.
+rust-analyzer uses the same trick, called the "IntelliJ Trick" in their contributing guide: insert a fake identifier (`complete_me`) at the cursor position, re-parse, and analyze the patched tree. For macros specifically, rust-analyzer's `expand_speculative` re-expands the enclosing macro with the fake identifier in its arguments and maps the token into the expansion. This is actually *more targeted* than treason's approach (which re-expands the entire program).
+
+Lean 4 is even more sophisticated: it never re-elaborates for completion. During normal elaboration, `CompletionInfo` nodes are emitted into the `InfoTree` carrying the local context and expected type. The server reads these directly. For positions with no `CompletionInfo` (whitespace, empty blocks), a "synthetic completion" fallback inspects the syntax tree without re-elaboration. For macro hygiene, if an identifier is synthetic (macro-generated) with macro scopes, the completion system explicitly returns no completions. This single-pass approach is cleaner and cheaper than both treason's and rust-analyzer's re-expansion strategies.
 
 ### Potentially novel: Pattern variable IDE support
 
