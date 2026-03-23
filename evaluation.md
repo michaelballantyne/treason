@@ -55,11 +55,13 @@ rust-analyzer uses the same trick, called the "IntelliJ Trick" in their contribu
 
 ### Potentially novel: Pattern variable IDE support
 
-rust-analyzer has **no support** for navigating within `macro_rules!` definitions. You cannot goto-definition from a `$x` reference in the transcriber (RHS) to its declaration in the matcher (LHS). This is an open feature request (issue #7890). Lean 4 uses syntax quotations for macros rather than pattern/template syntax; I could not find evidence of IDE navigation within `macro_rules` patterns/templates.
+rust-analyzer has **no support** for navigating within `macro_rules!` definitions. You cannot goto-definition from a `$x` reference in the transcriber (RHS) to its declaration in the matcher (LHS). This is an open feature request (issue #7890).
 
-Treason provides full IDE support for pattern variables: goto-definition on a template pvar reference jumps to the pattern, find-references on a pattern pvar finds all template uses, autocomplete in templates includes pvars. This works even for never-invoked macros because pvar resolutions are recorded eagerly at definition time.
+Lean 4 **does** have pattern variable IDE support, but through a different mechanism: pattern variables in `macro_rules` are regular Lean-level `let` bindings of type `TSyntax k`. The `$x` splice in a quotation template is a regular Lean expression referencing that binding, so goto-def "just works" with no special machinery. This is arguably a stronger design — Lean gets pattern variable IDE support for free by making pattern variables first-class language bindings.
 
-However, this is a narrow feature specific to `syntax-rules`-style macros, not an architectural insight.
+Treason provides full IDE support for pattern variables via special-purpose machinery: `pattern-variable-binding` types and `record-all-pvar-resolutions-for-macrot!` for eager resolution at definition time. This works even for never-invoked macros. But it achieves the same result as Lean with more effort.
+
+The only system treason clearly outperforms here is rust-analyzer, and rust-analyzer's limitation is a known engineering gap (open issue #7890), not a fundamental architectural issue.
 
 ### Potentially novel: Multi-valued resolution with intersection semantics
 
@@ -75,7 +77,7 @@ DrRacket's check-syntax requires macro authors to attach `syntax-property` annot
 DrRacket's check-syntax draws binding arrows using `syntax-property` annotations. Requires macro-author cooperation. Runs after expansion as a separate traversal. DrRacket does not attempt fault-tolerant expansion — a macro error halts analysis. Treason's approach is more automatic but limited to `syntax-rules`.
 
 ### Lean 4 InfoTree
-The elaborator produces an `InfoTree` during elaboration — same "expansion as analysis" architecture. `PartialTermInfo` and `ChoiceInfo` retain partial results from failed elaborators. The `InfoTree` supports metavariable-like holes for incremental elaboration. Completion uses `CompletionInfo` nodes recorded during elaboration, reading local context and expected type directly from the tree (not via re-elaboration with a synthetic identifier). More sophisticated than treason in every dimension.
+The elaborator produces an `InfoTree` during elaboration — same "expansion as analysis" architecture. `PartialTermInfo` and `ChoiceInfo` retain partial results from failed elaborators. The `InfoTree` supports metavariable-like holes for incremental elaboration. Completion uses `CompletionInfo` nodes recorded during elaboration, reading local context and expected type directly from the tree (not via re-elaboration with a synthetic identifier). Lean 4 also has a "canonical synthetic `SourceInfo`" flag that lets macro-generated identifiers be treated "as if" the user wrote them for IDE purposes — a more sophisticated version of treason's surface-vs-macro-introduced distinction. Lean does not need DrRacket's `disappeared-use`/`disappeared-binding` because binding information is preserved through canonical source info, pre-resolved identifiers, and macro scopes. Pattern variables in `macro_rules` are regular Lean bindings and get IDE features for free. More sophisticated than treason in every dimension.
 
 ### rust-analyzer
 Uses fake-identifier insertion + `expand_speculative` for completions inside macros — the same basic approach as treason's cursor insertion. Continues analysis past macro failures. Has no support for navigating within `macro_rules!` definitions (open issue #7890). Faces harder problems than treason due to proc macros (opaque, potentially non-deterministic, can crash). Navigation for items *produced* by macro expansion works, but navigation *within* macro definitions is limited.
