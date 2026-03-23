@@ -25,7 +25,7 @@ The expander catches `stx-error` exceptions and embeds them as values in the exp
 
 ### 4. Autocomplete via Cursor Insertion and Re-expansion
 
-When the cursor is not on an existing identifier, treason inserts a synthetic cursor identifier at the cursor position and re-expands the entire program. The cursor goes through normal expansion (acquires marks, enters scopes) so autocomplete respects hygiene and macro-introduced scoping. This is a clean solution to the problem of "what names are available at this position" that naturally handles macros.
+When the cursor is not on an existing identifier, treason inserts a synthetic cursor identifier at the cursor position and re-expands the entire program. The cursor goes through normal expansion (acquires marks, enters scopes) so autocomplete respects hygiene and macro-introduced scoping.
 
 ### 5. Scope Snapshots for Correctness
 
@@ -39,90 +39,79 @@ Pattern variables in `syntax-rules` patterns get their own binding/resolution tr
 
 When a macro duplicates use-site syntax (e.g., `(syntax-rules () [(_ x) (let ([a x]) x)])`), the same source span may be resolved multiple times under different scopes. The resolution tables are multi-valued (lists of Resolutions per span). For autocomplete, the intersection of names-in-scope across all resolutions is returned — a principled answer to the question "what can I type here if this syntax appears in multiple expansion contexts?"
 
-## Assessment of Novelty
+## Honest Assessment of Novelty
 
-### What's new here
+### Not novel: Fault tolerance
 
-**The integration of fault-tolerant expansion, LSP table instrumentation, and hygienic macro expansion into a single unified mechanism** is the main contribution. No prior system that I'm aware of provides all of the following simultaneously:
+All production systems achieve the same basic property. rust-analyzer continues analysis past macro failures (proc macros that fail produce `compile_error!`; the surrounding code still gets full analysis). Lean 4 retains `PartialTermInfo` and `ChoiceInfo` from failed elaborators so the language server provides interactivity even when elaboration fails. In all three systems — treason, rust-analyzer, Lean 4 — macros are all-or-nothing (they succeed or fail), and the surrounding system recovers structurally at the enclosing binding form. Treason does nothing here that the others don't.
 
-1. **The expander *is* the IDE analysis** — resolution recording is woven into `scope-resolve`, not bolted on after the fact.
-2. **Fault tolerance** — expansion continues past errors, and LSP features degrade gracefully.
-3. **Hygiene-aware autocomplete** via cursor insertion and re-expansion.
-4. **Multi-valued resolution** for syntax duplicated by macros, with principled intersection semantics.
-5. **Pattern variable IDE support** with eager resolution recording.
+### Not novel: Expander produces IDE metadata
 
-Each of these ideas is individually modest, but their combination in a clean, small system is what makes the contribution interesting.
+Lean 4's elaborator produces an `InfoTree` during elaboration — the same architecture as treason's approach. The elaborator *is* the IDE analysis; there is no separate pass. `InfoTree` nodes record types, goals, local contexts, macro expansion steps, and completion info. The `InfoTree` even supports metavariable-like holes for incremental elaboration. This is more sophisticated than treason's approach, not less.
 
-### What's not new
+### Not novel: Cursor insertion for autocomplete
 
-- Hygienic macro expansion via scope graphs (prior work by the author, Flatt's "Binding as Sets of Scopes").
-- LSP implementations for macro-extensible languages exist (DrRacket/check-syntax, racket-langserver).
-- Fault-tolerant parsing and type-checking for IDEs is well-established (tree-sitter, rust-analyzer, etc.).
-- Scope graphs for name resolution (Néron, Tolmach, Visser — ESOP 2015).
+rust-analyzer uses the same trick, called the "IntelliJ Trick" in their contributing guide: insert a fake identifier (`complete_me`) at the cursor position, re-parse, and analyze the patched tree. For macros specifically, rust-analyzer's `expand_speculative` re-expands the enclosing macro with the fake identifier in its arguments and maps the token into the expansion. This is actually *more targeted* than treason's approach (which re-expands the entire program). The `expand_speculative` approach avoids polluting the salsa cache and only re-expands the relevant macro call, not the whole file.
+
+### Potentially novel: Pattern variable IDE support
+
+rust-analyzer has **no support** for navigating within `macro_rules!` definitions. You cannot goto-definition from a `$x` reference in the transcriber (RHS) to its declaration in the matcher (LHS). This is an open feature request (issue #7890). Lean 4 uses syntax quotations for macros rather than pattern/template syntax; I could not find evidence of IDE navigation within `macro_rules` patterns/templates.
+
+Treason provides full IDE support for pattern variables: goto-definition on a template pvar reference jumps to the pattern, find-references on a pattern pvar finds all template uses, autocomplete in templates includes pvars. This works even for never-invoked macros because pvar resolutions are recorded eagerly at definition time.
+
+However, this is a narrow feature specific to `syntax-rules`-style macros, not an architectural insight.
+
+### Potentially novel: Multi-valued resolution with intersection semantics
+
+When a macro duplicates use-site syntax, the same source span is resolved multiple times under different scopes. The intersection semantics for autocomplete gives a principled answer. rust-analyzer and Lean 4 don't face this specific problem because their macro systems don't duplicate use-site syntax in the same way. But again, this is a narrow case.
+
+### Not novel but different from DrRacket: No macro-author cooperation needed
+
+DrRacket's check-syntax requires macro authors to attach `syntax-property` annotations (`'disappeared-use`, `'disappeared-binding`) for correct binding arrows. Treason's approach is automatic for `syntax-rules` macros. However, this advantage disappears if treason were extended to procedural macros — the same cooperation problem would arise. And Lean 4 and rust-analyzer also don't require macro-author cooperation for basic IDE features within expanded code.
 
 ## Closest Related Work
 
 ### DrRacket Check Syntax
-DrRacket's check-syntax draws binding arrows between identifiers using `syntax-property` annotations (`'disappeared-use`, `'disappeared-binding`). However, this system requires macro authors to explicitly cooperate by attaching properties. It also runs *after* expansion as a separate traversal, rather than being integrated into the expander. DrRacket does not attempt fault-tolerant expansion — a macro error halts analysis. Treason's approach is more automatic (no macro-author cooperation needed for basic LSP features) but limited to `syntax-rules` macros (no procedural macros).
+DrRacket's check-syntax draws binding arrows using `syntax-property` annotations. Requires macro-author cooperation. Runs after expansion as a separate traversal. DrRacket does not attempt fault-tolerant expansion — a macro error halts analysis. Treason's approach is more automatic but limited to `syntax-rules`.
 
 ### Lean 4 InfoTree
-Lean 4's elaborator produces an `InfoTree` during elaboration that records types, goals, macro expansion steps, and other metadata used by the language server. The `InfoTree` supports metavariable-like holes for incremental elaboration. This is architecturally similar to treason's approach — elaboration/expansion produces metadata consumed by IDE features — but operates in a much more complex setting (dependent types, tactics, universe polymorphism). Lean does not specifically address the problem of fault-tolerant elaboration for IDE use, though its incremental snapshot-based architecture provides partial results.
+The elaborator produces an `InfoTree` during elaboration — same "expansion as analysis" architecture. `PartialTermInfo` and `ChoiceInfo` retain partial results from failed elaborators. The `InfoTree` supports metavariable-like holes for incremental elaboration. Completion uses `CompletionInfo` nodes recorded during elaboration, reading local context and expected type directly from the tree (not via re-elaboration with a synthetic identifier). More sophisticated than treason in every dimension.
 
 ### rust-analyzer
-rust-analyzer faces the challenge that name resolution and macro expansion are deeply intertwined in Rust. It handles proc macros by running them in a separate process and caching results. It has significant challenges with fault tolerance (proc macros that receive syntactically invalid input tend to produce `compile_error!`). The rust-analyzer blog post "IDEs and Macros" (2021) articulates many of the same problems treason addresses, but in a more complex and less clean setting. rust-analyzer does not have a principled story for autocomplete inside macro-generated code.
+Uses fake-identifier insertion + `expand_speculative` for completions inside macros — the same basic approach as treason's cursor insertion. Continues analysis past macro failures. Has no support for navigating within `macro_rules!` definitions (open issue #7890). Faces harder problems than treason due to proc macros (opaque, potentially non-deterministic, can crash). Navigation for items *produced* by macro expansion works, but navigation *within* macro definitions is limited.
 
 ### Spoofax / Statix
-The Spoofax language workbench uses scope graphs (via the Statix metalanguage) to declaratively specify name binding, and derives IDE editor services (completion, renaming) from these specifications. This is the most architecturally similar approach: scope graphs are the shared representation for both semantic analysis and IDE features. However, Spoofax targets language *workbench* users (language designers), not language *implementation* (a hand-written expander). Spoofax does not handle macro expansion — its scope graphs describe the binding structure of the surface language. Recent work on "Language-Parametric Static Semantic Code Completion" (OOPSLA 2022) derives code completion from Statix specs, but without macro expansion.
+Uses scope graphs to declaratively specify name binding and derive IDE editor services. Most architecturally similar: scope graphs are the shared representation for semantic analysis and IDE features. Does not handle macro expansion. Recent work on "Language-Parametric Static Semantic Code Completion" (OOPSLA 2022) derives code completion from Statix specs.
 
 ### syntax-spec (Ballantyne et al., ICFP 2024)
-syntax-spec is a metalanguage for creating hosted DSLs in Racket. It provides grammar and binding rule declarations, and generates a macro expander that checks binding and expands DSL macros. This is closely related: it also integrates binding analysis with macro expansion. However, syntax-spec targets DSL *creation* within Racket's ecosystem and relies on DrRacket for IDE support. It does not itself provide LSP features or fault-tolerant expansion. Treason could be seen as exploring a complementary dimension: what if the expander itself were designed from the ground up to produce IDE metadata?
-
-### Macros for Domain-Specific Languages (Ballantyne, King, Felleisen — OOPSLA 2020)
-The `ee-lib` API provides scoping and binding primitives for DSL macro expanders. The paper discusses how DSL expanders need to manage scopes, bindings, and macro application. This is the intellectual ancestor of treason's approach, but `ee-lib` is an API for building expanders within Racket, not a standalone system with integrated LSP support and fault tolerance.
-
-## Potential Paper Pitch
-
-### Title
-"Expansion as Analysis: Integrating IDE Services into a Hygienic Macro Expander"
-
-### Thesis
-IDE features for macro-extensible languages can be provided *automatically* — without cooperation from macro authors — by instrumenting the macro expander to record resolution metadata during expansion. Combined with fault-tolerant expansion and cursor-insertion-based autocomplete, this yields a complete LSP implementation from a single expansion pass.
-
-### Venue
-- **OOPSLA** (Experience Reports or main track): The work is systems-oriented with a clear design contribution. OOPSLA has published related work (Ballantyne et al. 2020, Spoofax papers).
-- **ICFP** (Functional Pearl): If the presentation emphasizes the elegance of the single-pass design and the cursor-insertion trick.
-- **SLE** (Software Language Engineering): Natural fit for language tooling and IDE support research.
-- **<Programming>**: Good venue for language design and implementation papers with a practical bent.
-
-### Key Claims
-1. A macro expander can serve as the sole source of IDE metadata, eliminating the need for separate analysis passes or macro-author cooperation.
-2. Fault-tolerant expansion (via error sentinel values) enables LSP features on incomplete programs.
-3. Cursor insertion with re-expansion provides hygiene-aware autocomplete that correctly handles macro-introduced scoping.
-4. Multi-valued resolution tables with intersection semantics give principled answers for syntax duplicated by macros.
+Metalanguage for creating hosted DSLs in Racket. Provides grammar and binding rule declarations. Generates a macro expander that checks binding. Relies on DrRacket for IDE support. Does not itself provide LSP features or fault-tolerant expansion.
 
 ## What Would Make This More Interesting
 
 ### 1. Procedural Macros
-The current system only supports `syntax-rules`. Extending to procedural macros (arbitrary Racket functions producing syntax) would dramatically increase the scope and challenge. The key question: can the expander still automatically provide IDE features when macro transformers are opaque functions? This is the problem that makes DrRacket's `disappeared-use`/`disappeared-binding` mechanism necessary.
+The current system only supports `syntax-rules`. Extending to procedural macros (arbitrary Racket functions producing syntax) is the real test. The key question: can the expander still automatically provide IDE features when macro transformers are opaque functions? This is where DrRacket needs `disappeared-use`/`disappeared-binding`, and where rust-analyzer's `expand_speculative` breaks down for attribute macros.
 
 ### 2. Formal Properties and Proofs
-The design document (`.kiro/specs/lsp-support-scope-graph/design.md`) lists 13 correctness properties, but these were written against an earlier design that used integer `Surface_Node_ID`s on `stx` nodes. The implemented system keys LSP tables on **spans** instead and has no `id` field on `stx`. The *spirit* of many properties still applies (e.g., macro-introduced nodes aren't tracked because they lack source spans; autocomplete soundness is still a meaningful goal), but the specific formulations would need to be rewritten against the actual implementation. Formally stating and proving properties of the span-keyed design — even for the restricted `syntax-rules` setting — would significantly strengthen the contribution. Autocomplete soundness ("any name returned by autocomplete, if inserted, would not produce an unbound error") is particularly interesting and non-trivial.
+See `properties.md`. The most interesting property is autocomplete soundness: any name returned by autocomplete, if inserted, would not produce an unbound error. Proving this connects the scope graph traversal (`scope->names`) to actual expansion behavior and requires showing that cursor insertion is "transparent" (doesn't perturb the rest of expansion). No existing system has proven such a property.
 
 ### 3. Incremental Re-expansion
-Currently, every edit triggers full re-expansion. The notes.md file contains extensive thinking about incremental/reactive re-expansion. Implementing this — even partially — would address scalability and connect to the Lean 4 snapshot-based approach and Spoofax's incremental constraint solving.
+Currently, every edit triggers full re-expansion (and autocomplete at non-identifier positions triggers a *second* full re-expansion). Lean 4's snapshot-based incremental architecture is far more sophisticated. Implementing even partial incrementality would address scalability.
 
-### 4. Evaluation on Real Programs / User Study
-A comparison with DrRacket's check-syntax on equivalent programs (especially programs with macros, errors, and incomplete code) would provide concrete evidence of the advantages. A user study comparing IDE responsiveness and correctness across treason, DrRacket, and a baseline (no macro awareness) would be compelling.
+### 4. Grammar and Binding Rule Declarations
+Declaring the grammar and binding structure of macros (as syntax-spec does) would enable richer completions, better error recovery, and analysis without full expansion. This connects to both the syntax-spec line of work and the Spoofax/Statix approach.
 
-### 5. Grammar and Binding Rule Declarations
-The TODO mentions grammar-informed early subexpression expansion for incomplete macro uses. Declaring the grammar and binding structure of macros (as syntax-spec does) would enable richer completions, better error recovery, and analysis without full expansion. This connects directly to the syntax-spec line of work and the Spoofax/Statix approach.
-
-### 6. Multi-File / Module Support
-The current system is single-file. Adding module support would introduce cross-file resolution, import/export tracking, and the need for incremental analysis — all significant IDE challenges.
-
-### 7. Blame and Error Reporting for Macros
-The notes.md discusses the subtle problem of error blame in macro-expanded code (should errors point to the use site or the template?). A principled treatment of error blame that leverages the expansion metadata would be a standalone contribution.
+### 5. Evaluation Against DrRacket
+A concrete comparison with DrRacket's check-syntax on equivalent programs — especially programs with macros, errors, and incomplete code — would provide evidence of advantages. DrRacket's inability to provide IDE features after macro errors is a real limitation that treason addresses.
 
 ## Summary
 
-Treason represents a clean, focused exploration of an underexplored design point: **what happens when you design a macro expander from the ground up to produce IDE metadata?** The resulting system is simple enough to understand completely, yet addresses real problems (fault tolerance, hygiene-aware autocomplete, macro-duplicated syntax) that production systems struggle with. The main limitation is scope — `syntax-rules` only, single-file, no incremental re-expansion. The most promising directions for strengthening the contribution are (a) formal properties with proofs, (b) extension to procedural macros, and (c) an evaluation comparing with DrRacket's check-syntax on programs with macros and errors.
+After careful comparison with Lean 4, rust-analyzer, and DrRacket:
+
+- **Fault tolerance**: Same level as Lean 4 and rust-analyzer. Not a contribution.
+- **"Expander as IDE analysis" architecture**: Same as Lean 4's InfoTree. Not a contribution.
+- **Cursor insertion for autocomplete**: Same as rust-analyzer's "IntelliJ Trick" + `expand_speculative`. Not a contribution (and rust-analyzer's version is more targeted).
+- **Pattern variable IDE support**: Genuinely different from both rust-analyzer (which lacks it entirely, open issue #7890) and Lean 4 (no evidence of it). But narrow.
+- **Multi-valued resolution / intersection semantics**: Specific to `syntax-rules`-style duplication. Narrow.
+- **No macro-author cooperation**: True vs. DrRacket, but same as Lean 4 and rust-analyzer.
+
+The system is a clean pedagogical artifact and a solid engineering achievement, but the individual techniques are not novel relative to existing production systems. The most promising path to a research contribution would be either (a) formal proofs of the properties in `properties.md` (no existing system has these), (b) extension to procedural macros with a principled story for automatic IDE support, or (c) integration with grammar/binding-rule declarations (syntax-spec style) to enable richer IDE features without full expansion.
