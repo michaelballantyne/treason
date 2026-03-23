@@ -49,11 +49,28 @@ All production systems achieve the same basic property. rust-analyzer continues 
 
 Lean 4's elaborator produces an `InfoTree` during elaboration — the same architecture as treason's approach. The elaborator *is* the IDE analysis; there is no separate pass. `InfoTree` nodes record types, goals, local contexts, macro expansion steps, and completion info. The `InfoTree` even supports metavariable-like holes for incremental elaboration. This is more sophisticated than treason's approach, not less.
 
-### Not novel: Cursor insertion for autocomplete
+### Not novel as a technique, but interesting tradeoff: Cursor insertion for autocomplete
 
-rust-analyzer uses the same trick, called the "IntelliJ Trick" in their contributing guide: insert a fake identifier (`complete_me`) at the cursor position, re-parse, and analyze the patched tree. For macros specifically, rust-analyzer's `expand_speculative` re-expands the enclosing macro with the fake identifier in its arguments and maps the token into the expansion. This is actually *more targeted* than treason's approach (which re-expands the entire program).
+rust-analyzer uses the same fake-identifier trick (the "IntelliJ Trick") and `expand_speculative` for re-expanding the enclosing macro. The technique itself is not novel.
 
-Lean 4 is even more sophisticated: it never re-elaborates for completion. During normal elaboration, `CompletionInfo` nodes are emitted into the `InfoTree` carrying the local context and expected type. The server reads these directly. For positions with no `CompletionInfo` (whitespace, empty blocks), a "synthetic completion" fallback inspects the syntax tree without re-elaboration. For macro hygiene, if an identifier is synthetic (macro-generated) with macro scopes, the completion system explicitly returns no completions. This single-pass approach is cleaner and cheaper than both treason's and rust-analyzer's re-expansion strategies.
+Lean 4 takes a different approach: it never re-elaborates for completion. `CompletionInfo` nodes are emitted during elaboration and read directly. For non-identifier positions, a synthetic completion fallback inspects the syntax tree. This is more efficient for use-site completions.
+
+However, Lean 4's single-pass architecture means quotation template bodies are never elaborated, so **completions inside macro templates are zero**. The same design that makes use-site completion cheap makes template-site completion impossible. rust-analyzer similarly provides no completions inside `macro_rules!` template bodies.
+
+Treason's cursor-insertion approach is more expensive (full re-expansion) but works **everywhere**, including inside macro templates. A cursor inserted into a template position goes through the same expansion paths as any other template identifier — it gets pvar resolution eagerly and expansion-informed scope when the macro has invocations. See `autocomplete-design.md` for the detailed comparison.
+
+### Novel: Expansion-informed IDE services in macro templates
+
+Treason's span-keyed LSP tables cause expansion-time semantic information to flow back to macro template positions automatically. When a macro is invoked, template-introduced identifiers are resolved during expansion, and those resolutions are recorded at the template's source spans. This gives macro authors:
+
+- **Completions** at template positions reflecting what's in scope during expansion.
+- **Goto-definition** on template-introduced bindings/references.
+- **Semantic highlighting** based on expansion-time binding types.
+- **Multi-invocation accumulation**: each invocation adds resolutions; autocomplete returns the intersection.
+
+Neither Lean 4 nor rust-analyzer have this property. In Lean 4, quotation template bodies are not elaborated and nothing flows back from expansion. In rust-analyzer, `macro_rules!` template bodies have minimal IDE support and the `SpanMap` does not accumulate semantic information at template positions.
+
+This requires no special mechanism — it falls out of two design choices: (1) template-introduced identifiers retain their template spans during `expand-template`, and (2) `scope-resolve` records resolutions keyed by span. These are individually straightforward, but their combination produces a novel capability.
 
 ### Potentially novel: Pattern variable IDE support
 
@@ -112,10 +129,12 @@ A concrete comparison with DrRacket's check-syntax on equivalent programs — es
 After careful comparison with Lean 4, rust-analyzer, and DrRacket:
 
 - **Fault tolerance**: Same level as Lean 4 and rust-analyzer. Not a contribution.
-- **"Expander as IDE analysis" architecture**: Same as Lean 4's InfoTree. Not a contribution.
-- **Cursor insertion for autocomplete**: Same as rust-analyzer's "IntelliJ Trick" + `expand_speculative`. Not a contribution (and rust-analyzer's version is more targeted).
-- **Pattern variable IDE support**: Genuinely different from both rust-analyzer (which lacks it entirely, open issue #7890) and Lean 4 (no evidence of it). But narrow.
-- **Multi-valued resolution / intersection semantics**: Specific to `syntax-rules`-style duplication. Narrow.
+- **"Expander as IDE analysis" architecture**: Same as Lean 4's InfoTree. Not a contribution on its own.
+- **Cursor insertion for autocomplete**: Same technique as rust-analyzer. Not novel as a technique.
 - **No macro-author cooperation**: True vs. DrRacket, but same as Lean 4 and rust-analyzer.
 
-The system is a clean pedagogical artifact and a solid engineering achievement, but the individual techniques are not novel relative to existing production systems. The most promising path to a research contribution would be either (a) formal proofs of the properties in `properties.md` (no existing system has these), (b) extension to procedural macros with a principled story for automatic IDE support, or (c) integration with grammar/binding-rule declarations (syntax-spec style) to enable richer IDE features without full expansion.
+- **Expansion-informed IDE services in macro templates**: Genuinely novel. Neither Lean 4 (quotation templates aren't elaborated) nor rust-analyzer (`macro_rules!` templates have minimal IDE support) provide IDE features inside macro templates that reflect actual expansion behavior. Treason's span-keyed tables cause this to happen automatically. See `autocomplete-design.md`.
+- **Pattern variable IDE support**: Treason and Lean 4 both support this (Lean via first-class bindings, treason via special machinery). rust-analyzer lacks it (open issue #7890).
+- **Multi-valued resolution / intersection semantics**: Falls out of the template-span design. Principled but narrow.
+
+The strongest potential contribution is the expansion-informed template IDE story: the observation that keying LSP tables by span + preserving template spans through expansion causes semantic information to flow from use sites back to the macro definition automatically. This is a design insight that could inform production systems. The most promising directions for a paper are (a) developing this insight with formal properties, (b) extending to procedural macros, or (c) integrating with grammar/binding-rule declarations to provide template IDE services without requiring invocations.
