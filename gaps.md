@@ -94,18 +94,42 @@ Treason has no type system, so hover is limited to "this identifier resolves to 
 
 **The problem**: When a macro use is partially typed, the pattern doesn't match, so no expansion occurs. The IDE is dark.
 
-**The insight**: A `syntax-rules` pattern IS a grammar declaration. The pattern `(_ ([var expr]) body)` declares that the macro expects a binding pair followed by a body. Before the pattern fully matches, the system can:
+**The insight**: A `syntax-rules` pattern IS a grammar declaration. The pattern `(_ ([var expr]) body)` declares that the macro expects a binding pair followed by a body. This grammar information can power three kinds of service:
+
+#### 1a. Snippet completions for syntactic forms
+
+When the user types a macro name (or the IDE offers it as a completion), the system can generate a snippet from the macro's pattern:
+
+- `let` → `(let ([${1:var} ${2:expr}]) ${3:body})`
+- `define-syntax` → `(define-syntax ${1:name} (syntax-rules () [(_ ${2:args}) ${3:template}]))`
+- User-defined macro `my-let` with pattern `(_ ([var rhs]) body)` → `(my-let ([${1:var} ${2:rhs}]) ${3:body})`
+
+Every macro with a declared pattern gets a snippet for free. For macros with multiple clauses, multiple snippets are offered. For DSL macros, the snippets reflect the DSL's grammar.
+
+Lean 4 generates snippets for built-in syntax declarations, but not for user-defined macros. rust-analyzer does not generate snippets from `macro_rules!` patterns. No system generates snippets from user-defined macro patterns.
+
+#### 1b. Partial match services
+
+Before the pattern fully matches, the system can:
 
 1. **Recognize partial matches**: The pattern has matched up to a certain point. The next expected element is known.
-2. **Pre-bind identifiers**: If the pattern has matched `(_ ([x `, we know `x` is in binding position. Tentatively bind it.
+2. **Pre-bind identifiers**: If the pattern has matched `(_ ([x `, we know `x` is in binding position. Tentatively bind it so completions in subsequent positions include `x`.
 3. **Offer grammar-aware completions**: At the cursor, show what the grammar expects (an expression, an identifier, etc.).
 4. **Expand subexpressions early**: The already-matched subexpressions can be expanded in the current scope, providing IDE services for the parts that are complete.
 
 This is the "grammar-informed early subexpression expansion" mentioned in TODO.md (treason-idb).
 
-**What's needed**: A partial pattern matching algorithm that returns the set of possible continuations at the match frontier, plus the bindings discovered so far.
+#### 1c. Signature help
 
-**Novelty**: No existing system does this. Lean 4's macros fail completely on partial syntax. rust-analyzer's macro expansion is all-or-nothing. Spoofax has grammar-aware completion for surface syntax but not for macro invocations.
+When the cursor is inside a macro invocation, the IDE can show the macro's expected form — like function signature help but for syntactic forms:
+
+- Cursor inside `(let |)` → show `(let ([var expr]) body)` with the current position highlighted
+- Cursor inside `(let ([x 1]) |)` → show the body position is expected
+- For multi-clause macros, show all matching clause patterns
+
+**What's needed**: A partial pattern matching algorithm that returns the set of possible continuations at the match frontier, plus the bindings discovered so far. For snippets, a pattern-to-snippet translator.
+
+**Novelty**: No existing system provides grammar-informed services for partially typed user-defined macro invocations. Lean 4's macros fail completely on partial syntax. rust-analyzer's macro expansion is all-or-nothing. Spoofax has grammar-aware completion for surface syntax but not for macro invocations. Snippet generation from macro patterns is not done by any system.
 
 ### Direction 2: Binding Rules for Template Analysis
 
@@ -155,10 +179,10 @@ This is essentially what syntax-spec's `bind!` and `scope-tagger` already do, bu
 
 ## Priorities
 
-**Highest impact, most feasible**: Direction 1 (grammar-informed incomplete macro uses). This addresses the most common pain point (IDE going dark while typing), builds naturally on treason's existing syntax-rules patterns, and is self-contained.
+**Highest impact, most feasible**: Direction 1 (grammar-informed services). Snippets, partial matching, and signature help all derive from the same source: the macro's pattern-as-grammar. Snippets are the easiest to implement and immediately useful. Partial matching is harder but addresses the most common pain point (IDE dark while typing). This builds naturally on treason's existing `syntax-rules` patterns and is self-contained.
 
-**Highest novelty**: Direction 2 + 3 (binding rules for templates, compositional). This tells the strongest research story and connects to syntax-spec.
+**Highest novelty**: Direction 1 + 2 combined. The paper story: "grammar and binding rule declarations enable comprehensive IDE services for macro-extensible languages — snippet generation, grammar-aware completion during editing, and binding-informed services in macro templates — without requiring macro invocations." This connects syntax-spec's binding rules to IDE service generation, extending the Spoofax/Statix story to macro templates.
 
 **Highest practical value**: Direction 4 (procedural macro API). This is what production systems need. But it's also the hardest and most open-ended.
 
-**Recommended path**: Start with Direction 1 (incomplete macro uses — it's immediately useful and feasible), then extend to Direction 2 (binding rules for templates — strengthens the research story), and frame the paper around the combination: "grammar and binding rule declarations enable comprehensive IDE services for macro-extensible languages, including during editing (incomplete code) and at macro definition sites (templates)."
+**Recommended path**: Start with Direction 1a (snippet generation from patterns — it's immediately useful, easy to implement, and demonstrates the grammar-as-IDE-spec idea). Then Direction 1b (partial matching — the hard technical contribution). Then Direction 2 (binding rules for templates — strengthens the research story). Frame the paper around the unifying idea: **macro patterns and binding rules are not just specifications for the expander — they are specifications for IDE services.** The same declaration that tells the expander how to match and expand also tells the IDE what snippets to offer, what completions are valid during editing, what names are bound in templates, and what the output grammar looks like.
